@@ -442,6 +442,120 @@ def suggest_v2_status(job_id: str) -> str:
 
 
 @mcp.tool()
+def generate_sbom(
+    target: str,
+    target_type: str | None = None,
+    scan_path: str = "/",
+    timeout: int = 0,
+    force: bool = False,
+    remote_sbom: bool = False,
+    debug_save_path: str | None = None,
+) -> str:
+    """Generate a CycloneDX SBOM for a target and cache it — no CVE triage.
+
+    Use this to pre-build the SBOM (the slow part for a fresh full-host scan)
+    ahead of time and out of band. A later suggest_v2 for the same target and
+    scan_path reuses the cached SBOM and only pays the fast triage cost.
+
+    ASYNC: returns immediately with {"status":"scanning","job_id":...}. Poll
+    generate_sbom_status(job_id) until status="done".
+
+    Args:
+        target: SSH target (user@host), container image reference, or local path.
+        target_type: "ssh", "image", or "path". Auto-detected from target if omitted.
+        scan_path: Directory to scan on a remote SSH host (default "/"). With
+                   remote_sbom, this is the path to a pre-generated SBOM file.
+                   Ignored for image and path targets.
+        timeout: Syft scan timeout in seconds. 0 uses the server default.
+        force: Re-run syft even if a cached SBOM exists (default false).
+        remote_sbom: SSH only. Read scan_path as a pre-generated SBOM file instead
+                     of running syft (no fallback). Errors loudly if unreadable.
+        debug_save_path: When set, write the raw SBOM JSON to this path.
+
+    Returns:
+        JSON {"status":"scanning","job_id":...}. generate_sbom_status returns the
+        SBOM metadata (component_count, cache_file, from_cache, sbom_source, …).
+    """
+    started = time.perf_counter()
+    from redforge.commands.suggest_v2 import ScanError, detect_target_type, generate_sbom_core
+
+    ssh_key_path = os.environ.get("SSH_KEY_PATH", "/etc/ssh-key/id_ed25519")
+    effective_timeout = timeout if timeout > 0 else int(os.environ.get("SYFT_TIMEOUT", "600"))
+
+    try:
+        resolved_type = detect_target_type(target, target_type)
+    except ValueError as exc:
+        return json.dumps({"error": True, "stage": "input_validation", "message": str(exc)}, indent=2)
+
+    args_summary = {"target": target, "target_type": resolved_type, "scan_path": scan_path}
+
+    job_id = str(uuid.uuid4())
+    _scan_jobs[job_id] = {"status": "running", "started": time.time(), "result": None, "error": None}
+
+    def _run() -> None:
+        try:
+            metadata = generate_sbom_core(
+                target=target,
+                target_type=target_type,
+                scan_path=scan_path,
+                timeout=effective_timeout,
+                ssh_key_path=ssh_key_path,
+                force=force,
+                remote_sbom=remote_sbom,
+                debug_save_path=debug_save_path,
+            )
+            _scan_jobs[job_id]["result"] = metadata
+            _scan_jobs[job_id]["status"] = "done"
+            _tool_log("generate_sbom", args_summary, started, ok=True)
+        except ScanError as exc:
+            _scan_jobs[job_id]["error"] = str(exc)
+            _scan_jobs[job_id]["error_detail"] = {"exit_code": exc.exit_code, "stderr": exc.stderr, "hint": exc.hint}
+            _scan_jobs[job_id]["status"] = "error"
+            _tool_log("generate_sbom", args_summary, started, ok=False, err=str(exc))
+        except Exception as exc:
+            _scan_jobs[job_id]["error"] = str(exc)
+            _scan_jobs[job_id]["status"] = "error"
+            _tool_log("generate_sbom", args_summary, started, ok=False, err=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return json.dumps({
+        "status": "scanning",
+        "job_id": job_id,
+        "message": "SBOM generation started in background. Call generate_sbom_status with this job_id.",
+    }, indent=2)
+
+
+@mcp.tool()
+def generate_sbom_status(job_id: str) -> str:
+    """Check the status of a background generate_sbom job.
+
+    Args:
+        job_id: The job_id returned by generate_sbom.
+
+    Returns:
+        status="running" with elapsed_seconds while in progress;
+        status="done" with the SBOM metadata (component_count, cache_file, …);
+        status="error" with details on failure.
+    """
+    job = _scan_jobs.get(job_id)
+    if job is None:
+        return json.dumps({"error": True, "message": f"Unknown job_id: {job_id!r}. Only jobs from this server session are tracked."}, indent=2)
+
+    if job["status"] == "running":
+        elapsed = round(time.time() - job["started"], 1)
+        return json.dumps({"status": "running", "job_id": job_id, "elapsed_seconds": elapsed}, indent=2)
+
+    if job["status"] == "error":
+        detail = job.get("error_detail", {})
+        return json.dumps({
+            "status": "error", "job_id": job_id, "error": True,
+            "stage": "sbom_generation", "message": job["error"], **detail,
+        }, indent=2)
+
+    return json.dumps({"status": "done", "job_id": job_id, **job["result"]}, indent=2)
+
+
+@mcp.tool()
 def plan_insights(cves: list[dict], target_host: str) -> str:
     """Create a Red Hat Insights remediation plan for a list of CVEs on a specific host.
 

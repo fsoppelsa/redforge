@@ -338,30 +338,21 @@ def scan_to_sbom(
 
 # ── Public pipeline entry point ───────────────────────────────────────────────
 
-def suggest_v2_core(
-    config: dict[str, Any],
+def _acquire_sbom(
     target: str,
-    target_type: str | None = None,
-    scan_path: str = "/",
-    top_n: int = 25,
-    timeout: int = _DEFAULT_TIMEOUT,
-    ssh_key_path: str = _DEFAULT_SSH_KEY_PATH,
-    debug_save_path: str | None = None,
-    force: bool = False,
-    remote_sbom: bool = False,
-) -> dict[str, Any]:
-    """
-    Full suggest_v2 pipeline: detect target type, generate SBOM, triage.
+    target_type: str | None,
+    scan_path: str,
+    timeout: int,
+    ssh_key_path: str,
+    force: bool,
+    remote_sbom: bool,
+    debug_save_path: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Generate (or load from cache) the SBOM only — no triage.
 
-    If a cached SBOM exists for this target it is reused unless force=True.
-    The SBOM is always saved to the cache after a fresh scan.
-
-    When remote_sbom is True, scan_path is read as a pre-generated SBOM file on
-    the SSH host (no syft scan, no fallback). Only valid for SSH targets.
-
-    Returns a dict with summary, items, diagnostics (same shape as suggest_from_sbom),
-    plus a scan_metadata block. Raises ScanError if the scan stage fails so that
-    callers can distinguish scan failures from triage failures.
+    Returns (sbom, metadata). Shared by suggest_v2_core and generate_sbom_core so
+    the cache/scan/source logic lives in exactly one place. The SBOM is saved to
+    the shared cache after a fresh scan. Raises ScanError if the scan stage fails.
     """
     resolved_type = detect_target_type(target, target_type)
     if remote_sbom and resolved_type != "ssh":
@@ -396,24 +387,77 @@ def suggest_v2_core(
     else:
         syft_version = "cached"
 
-    duration = round(time.perf_counter() - t0, 2)
-    component_count = len(sbom.get("components") or [])
-
     if debug_save_path:
         Path(debug_save_path).write_text(json.dumps(sbom, indent=2), encoding="utf-8")
 
-    scan_metadata: dict[str, Any] = {
+    metadata: dict[str, Any] = {
         "target": target,
         "target_type": resolved_type,
         "scan_path": reported_scan_path,
         "sbom_source": sbom_source,
         "syft_version": syft_version,
-        "component_count": component_count,
-        "duration_seconds": duration,
+        "component_count": len(sbom.get("components") or []),
+        "duration_seconds": round(time.perf_counter() - t0, 2),
         "from_cache": from_cache,
         "cache_file": str(cache_file),
-        "stage_reached": "triage",
     }
+    return sbom, metadata
+
+
+def generate_sbom_core(
+    target: str,
+    target_type: str | None = None,
+    scan_path: str = "/",
+    timeout: int = _DEFAULT_TIMEOUT,
+    ssh_key_path: str = _DEFAULT_SSH_KEY_PATH,
+    force: bool = False,
+    remote_sbom: bool = False,
+    debug_save_path: str | None = None,
+) -> dict[str, Any]:
+    """Generate (or reuse cached) the CycloneDX SBOM only — no CVE triage.
+
+    Returns the scan_metadata block (component_count, cache_file, from_cache, …).
+    The SBOM is written to the shared cache so a later suggest_v2 for the same
+    target/scan_path reuses it and only pays the triage cost. Raises ScanError if
+    the scan stage fails.
+    """
+    _sbom, metadata = _acquire_sbom(
+        target, target_type, scan_path, timeout, ssh_key_path, force, remote_sbom, debug_save_path
+    )
+    metadata["stage_reached"] = "sbom_generated"
+    return metadata
+
+
+def suggest_v2_core(
+    config: dict[str, Any],
+    target: str,
+    target_type: str | None = None,
+    scan_path: str = "/",
+    top_n: int = 25,
+    timeout: int = _DEFAULT_TIMEOUT,
+    ssh_key_path: str = _DEFAULT_SSH_KEY_PATH,
+    debug_save_path: str | None = None,
+    force: bool = False,
+    remote_sbom: bool = False,
+) -> dict[str, Any]:
+    """
+    Full suggest_v2 pipeline: detect target type, generate SBOM, triage.
+
+    If a cached SBOM exists for this target it is reused unless force=True.
+    The SBOM is always saved to the cache after a fresh scan.
+
+    When remote_sbom is True, scan_path is read as a pre-generated SBOM file on
+    the SSH host (no syft scan, no fallback). Only valid for SSH targets.
+
+    Returns a dict with summary, items, diagnostics (same shape as suggest_from_sbom),
+    plus a scan_metadata block. Raises ScanError if the scan stage fails so that
+    callers can distinguish scan failures from triage failures.
+    """
+    sbom, scan_metadata = _acquire_sbom(
+        target, target_type, scan_path, timeout, ssh_key_path, force, remote_sbom, debug_save_path
+    )
+    scan_metadata["stage_reached"] = "triage"
+    component_count = scan_metadata["component_count"]
 
     # Hand off to existing prioritization — no logic reimplemented here.
     result = suggest_from_sbom(config, sbom=sbom, top_n=top_n)
