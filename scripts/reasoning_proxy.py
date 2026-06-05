@@ -21,6 +21,9 @@ THINKING_PLACEHOLDER = os.environ.get("THINKING_PLACEHOLDER", "")
 DISPLAY_MODEL_ID = os.environ.get("DISPLAY_MODEL_ID", "").strip()
 UPSTREAM_MODEL_ID = os.environ.get("UPSTREAM_MODEL_ID", "").strip()
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "").strip()
+# Optional reasoning_effort to inject for reasoning-capable upstreams (e.g. gpt-5*):
+# minimal|low|medium|high. Empty = leave the request untouched.
+REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "").strip()
 REQUEST_MODEL_ALIASES = {
     alias.strip(): UPSTREAM_MODEL_ID
     for alias in (
@@ -272,6 +275,10 @@ def rewrite_model_aliases(payload):
         payload["model"] = REQUEST_MODEL_ALIASES[model]
     if "max_tokens" in payload and "max_completion_tokens" not in payload:
         payload["max_completion_tokens"] = payload.pop("max_tokens")
+    # Cap reasoning so the upstream doesn't spend the whole token budget thinking
+    # and return empty content. Only set when configured and not already present.
+    if REASONING_EFFORT and "reasoning_effort" not in payload:
+        payload["reasoning_effort"] = REASONING_EFFORT
 
     return payload
 
