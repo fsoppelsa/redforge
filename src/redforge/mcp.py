@@ -290,6 +290,7 @@ def suggest_v2(
     scan_path: str = "/",
     timeout: int = 0,
     force: bool = False,
+    remote_sbom: bool = False,
     debug_save_path: str | None = None,
 ) -> str:
     """Generate a CycloneDX SBOM with syft, then return prioritized CVEs.
@@ -306,11 +307,19 @@ def suggest_v2(
         target_type: "ssh", "image", or "path". Auto-detected from target if omitted.
         top_n: Number of CVEs to return (default 25).
         scan_path: Directory to scan on a remote SSH host (default "/").
+                   If this points to an existing SBOM file (CycloneDX JSON) on
+                   the remote host, that file is read and used directly instead
+                   of running syft — avoiding a potentially very long scan.
                    Ignored for image and path targets.
         timeout: Syft scan timeout in seconds. 0 uses the server default (SYFT_TIMEOUT
                  env var, fallback 600s). Large images or full-host scans may need
                  1200–1800s.
         force: Re-run syft even if a cached SBOM exists (default false).
+        remote_sbom: SSH only. Treat scan_path as a pre-generated SBOM file on the
+                     remote host: read it directly, never run syft, and never fall
+                     back to a scan. Errors loudly if the file can't be read. This
+                     is the deterministic, demo-safe way to use an existing SBOM,
+                     and it returns synchronously (no job_id) since the read is fast.
         debug_save_path: When set, write the raw SBOM JSON to this path for inspection.
 
     Returns:
@@ -339,39 +348,41 @@ def suggest_v2(
 
     args_summary = {"target": target, "target_type": resolved_type, "top_n": top_n, "scan_path": scan_path}
 
-    # Cache hit → return result synchronously (fast path, no blocking scan)
-    if not force:
-        cache_file = _cache_path(target, resolved_type, scan_path)
-        if _load_cached_sbom(cache_file) is not None:
-            try:
-                result = suggest_v2_core(
-                    _config,
-                    target=target,
-                    target_type=target_type,
-                    scan_path=scan_path,
-                    top_n=top_n,
-                    timeout=effective_timeout,
-                    ssh_key_path=ssh_key_path,
-                    debug_save_path=debug_save_path,
-                    force=False,
-                )
-                _tool_log("suggest_v2", args_summary, started, ok=True)
-                return json.dumps(result, indent=2)
-            except ScanError as exc:
-                _tool_log("suggest_v2", args_summary, started, ok=False, err=str(exc))
-                return json.dumps({
-                    "error": True, "stage": "sbom_generation", "message": str(exc),
-                    "exit_code": exc.exit_code, "stderr": exc.stderr, "hint": exc.hint,
-                    "summary": None, "items": [], "diagnostics": {},
-                    "scan_metadata": {"target": target, "target_type": resolved_type, "stage_reached": "sbom_generation"},
-                }, indent=2)
-            except Exception as exc:
-                _tool_log("suggest_v2", args_summary, started, ok=False, err=str(exc))
-                raise
+    cache_file = _cache_path(target, resolved_type, scan_path)
+    cache_hit = (not force) and _load_cached_sbom(cache_file) is not None
+
+    # Run synchronously when we expect a fast path: a cache hit, or reading a
+    # pre-generated SBOM off the remote host. Both avoid a long blocking scan.
+    if cache_hit or remote_sbom:
+        try:
+            result = suggest_v2_core(
+                _config,
+                target=target,
+                target_type=target_type,
+                scan_path=scan_path,
+                top_n=top_n,
+                timeout=effective_timeout,
+                ssh_key_path=ssh_key_path,
+                debug_save_path=debug_save_path,
+                force=force,
+                remote_sbom=remote_sbom,
+            )
+            _tool_log("suggest_v2", args_summary, started, ok=True)
+            return json.dumps(result, indent=2)
+        except ScanError as exc:
+            _tool_log("suggest_v2", args_summary, started, ok=False, err=str(exc))
+            return json.dumps({
+                "error": True, "stage": "sbom_generation", "message": str(exc),
+                "exit_code": exc.exit_code, "stderr": exc.stderr, "hint": exc.hint,
+                "summary": None, "items": [], "diagnostics": {},
+                "scan_metadata": {"target": target, "target_type": resolved_type, "stage_reached": "sbom_generation"},
+            }, indent=2)
+        except Exception as exc:
+            _tool_log("suggest_v2", args_summary, started, ok=False, err=str(exc))
+            raise
 
     # Cache miss (or force=True) → start background scan, return job_id immediately
     job_id = str(uuid.uuid4())
-    cache_file = _cache_path(target, resolved_type, scan_path)
     _scan_jobs[job_id] = {
         "status": "running",
         "started": time.time(),

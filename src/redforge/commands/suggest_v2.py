@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -66,6 +67,17 @@ def get_syft_version(syft_bin: str = "syft") -> str:
 
 
 # ── SSH scanning ──────────────────────────────────────────────────────────────
+
+def _ssh_options(ssh_key_path: str) -> list[str]:
+    """Shared ssh client options for non-interactive, key-based connections."""
+    return [
+        "-i", ssh_key_path,
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "UserKnownHostsFile=/tmp/known_hosts",
+    ]
+
 
 def _ssh_hint(stderr: str, exit_code: int) -> str:
     lower = stderr.lower()
@@ -138,6 +150,68 @@ def _run_syft_ssh(
                 "Empty SBOM usually indicates a privilege or path problem. "
                 "Verify the SSH user has passwordless sudo and scan_path exists on the host."
             ),
+        )
+
+    return stdout, stderr
+
+
+def _remote_is_file(target: str, scan_path: str, ssh_key_path: str) -> bool:
+    """Return True if scan_path is an existing regular file on the remote host.
+
+    Best-effort probe: any ssh/connection failure returns False so the caller
+    falls back to a normal syft directory scan (which surfaces the real error).
+    """
+    if not shutil.which("ssh"):
+        return False
+    cmd = ["ssh", *_ssh_options(ssh_key_path), target, f"test -f {shlex.quote(scan_path)}"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
+
+
+def _read_remote_sbom(
+    target: str,
+    scan_path: str,
+    timeout: int,
+    ssh_key_path: str,
+) -> tuple[str, str]:
+    """Read a pre-generated SBOM file from the remote host over SSH.
+
+    Returns (stdout, stderr). Raises ScanError on failure or empty output.
+    """
+    cmd = ["ssh", *_ssh_options(ssh_key_path), target, f"sudo cat {shlex.quote(scan_path)}"]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ScanError(
+            f"Reading remote SBOM timed out after {timeout}s",
+            hint="The SBOM file may be very large, or sudo prompted for a password.",
+        )
+
+    stderr = result.stderr or ""
+    stdout = result.stdout or ""
+
+    if result.returncode != 0:
+        if "no such file" in stderr.lower():
+            hint = f"{scan_path} does not exist on the host. Generate the SBOM there first, or omit remote_sbom to scan."
+        else:
+            hint = _ssh_hint(stderr, result.returncode)
+        raise ScanError(
+            f"Failed to read remote SBOM file (exit {result.returncode})",
+            exit_code=result.returncode,
+            stderr=stderr,
+            hint=hint,
+        )
+
+    if not stdout.strip():
+        raise ScanError(
+            "Remote SBOM file is empty",
+            exit_code=result.returncode,
+            stderr=stderr,
+            hint=f"{scan_path} exists on the host but contains no data.",
         )
 
     return stdout, stderr
@@ -218,31 +292,48 @@ def scan_to_sbom(
     scan_path: str = "/",
     timeout: int = _DEFAULT_TIMEOUT,
     ssh_key_path: str = _DEFAULT_SSH_KEY_PATH,
-) -> tuple[dict[str, Any], str]:
+    remote_sbom: bool = False,
+) -> tuple[dict[str, Any], str, str]:
     """
-    Run syft and return (sbom_dict, syft_stderr).
-    Raises ScanError on any syft failure or invalid output.
-    Never returns an empty or unparseable SBOM.
+    Run syft (or read a pre-generated SBOM) and return (sbom_dict, stderr, source).
+
+    source is one of: "ssh_file" (read an existing SBOM off the remote host),
+    "ssh_syft", "image", or "path". Raises ScanError on any failure or invalid
+    output. Never returns an empty or unparseable SBOM.
+
+    When remote_sbom is True, scan_path is treated as a pre-generated SBOM file
+    on the SSH host and read directly — no syft scan, no fallback. This is the
+    deterministic choice for demos; if the file can't be read it errors loudly.
     """
     if target_type == "ssh":
-        stdout, stderr = _run_syft_ssh(target, scan_path, timeout, ssh_key_path)
+        # Read a pre-generated SBOM directly when asked explicitly (remote_sbom)
+        # or when scan_path happens to point at an existing file — both skip the
+        # potentially very long syft scan. remote_sbom never falls back to syft.
+        if remote_sbom or _remote_is_file(target, scan_path, ssh_key_path):
+            stdout, stderr = _read_remote_sbom(target, scan_path, timeout, ssh_key_path)
+            source = "ssh_file"
+        else:
+            stdout, stderr = _run_syft_ssh(target, scan_path, timeout, ssh_key_path)
+            source = "ssh_syft"
     elif target_type == "image":
         stdout, stderr = _run_syft_local(target, timeout)
+        source = "image"
     elif target_type == "path":
         stdout, stderr = _run_syft_local(f"dir:{target}", timeout)
+        source = "path"
     else:
         raise ValueError(f"Unknown target_type: {target_type!r}")
 
     try:
         sbom = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise ScanError(
-            "syft output is not valid JSON",
-            stderr=stderr,
-            hint=f"JSON parse error: {exc}. Ensure syft writes only SBOM JSON to stdout.",
-        )
+        if source == "ssh_file":
+            hint = f"JSON parse error: {exc}. {scan_path} does not contain valid CycloneDX JSON."
+        else:
+            hint = f"JSON parse error: {exc}. Ensure syft writes only SBOM JSON to stdout."
+        raise ScanError("SBOM output is not valid JSON", stderr=stderr, hint=hint)
 
-    return sbom, stderr
+    return sbom, stderr, source
 
 
 # ── Public pipeline entry point ───────────────────────────────────────────────
@@ -257,6 +348,7 @@ def suggest_v2_core(
     ssh_key_path: str = _DEFAULT_SSH_KEY_PATH,
     debug_save_path: str | None = None,
     force: bool = False,
+    remote_sbom: bool = False,
 ) -> dict[str, Any]:
     """
     Full suggest_v2 pipeline: detect target type, generate SBOM, triage.
@@ -264,16 +356,25 @@ def suggest_v2_core(
     If a cached SBOM exists for this target it is reused unless force=True.
     The SBOM is always saved to the cache after a fresh scan.
 
+    When remote_sbom is True, scan_path is read as a pre-generated SBOM file on
+    the SSH host (no syft scan, no fallback). Only valid for SSH targets.
+
     Returns a dict with summary, items, diagnostics (same shape as suggest_from_sbom),
     plus a scan_metadata block. Raises ScanError if the scan stage fails so that
     callers can distinguish scan failures from triage failures.
     """
     resolved_type = detect_target_type(target, target_type)
+    if remote_sbom and resolved_type != "ssh":
+        raise ScanError(
+            f"remote_sbom is only valid for SSH targets, not {resolved_type!r}",
+            hint="Drop remote_sbom, or pass an SSH target (user@host) with scan_path set to the SBOM file.",
+        )
     reported_scan_path = scan_path if resolved_type == "ssh" else target
     cache_file = _cache_path(target, resolved_type, scan_path)
 
     t0 = time.perf_counter()
     from_cache = False
+    sbom_source = "cache"
 
     if not force:
         cached = _load_cached_sbom(cache_file)
@@ -282,15 +383,16 @@ def suggest_v2_core(
             from_cache = True
 
     if not from_cache:
-        syft_version = get_syft_version()
-        sbom, _syft_stderr = scan_to_sbom(
+        sbom, _syft_stderr, sbom_source = scan_to_sbom(
             target=target,
             target_type=resolved_type,
             scan_path=scan_path,
             timeout=timeout,
             ssh_key_path=ssh_key_path,
+            remote_sbom=remote_sbom,
         )
         _save_cached_sbom(cache_file, sbom)
+        syft_version = "remote-file" if sbom_source == "ssh_file" else get_syft_version()
     else:
         syft_version = "cached"
 
@@ -304,6 +406,7 @@ def suggest_v2_core(
         "target": target,
         "target_type": resolved_type,
         "scan_path": reported_scan_path,
+        "sbom_source": sbom_source,
         "syft_version": syft_version,
         "component_count": component_count,
         "duration_seconds": duration,
