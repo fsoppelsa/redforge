@@ -428,6 +428,37 @@ def generate_sbom_core(
     return metadata
 
 
+def sbom_cache_status(
+    target: str,
+    target_type: str | None = None,
+    scan_path: str = "/",
+) -> dict[str, Any]:
+    """Report whether a cached SBOM exists for this target/scan_path — no scan.
+
+    Read-only: never runs syft or SSH. Returns the cached flag plus component_count,
+    size and age when a cached SBOM is present. Uses the same cache key as
+    suggest_v2/generate_sbom, so a True result means suggest_v2 will reuse it.
+    """
+    resolved_type = detect_target_type(target, target_type)
+    cache_file = _cache_path(target, resolved_type, scan_path)
+    reported_scan_path = scan_path if resolved_type == "ssh" else target
+
+    status: dict[str, Any] = {
+        "cached": cache_file.exists(),
+        "target": target,
+        "target_type": resolved_type,
+        "scan_path": reported_scan_path,
+        "cache_file": str(cache_file),
+    }
+    if status["cached"]:
+        sbom = _load_cached_sbom(cache_file)
+        stat = cache_file.stat()
+        status["component_count"] = len(sbom.get("components") or []) if sbom else None
+        status["size_bytes"] = stat.st_size
+        status["age_seconds"] = round(time.time() - stat.st_mtime, 1)
+    return status
+
+
 def suggest_v2_core(
     config: dict[str, Any],
     target: str,

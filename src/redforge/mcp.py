@@ -556,6 +556,37 @@ def generate_sbom_status(job_id: str) -> str:
 
 
 @mcp.tool()
+def sbom_cached(target: str, target_type: str | None = None, scan_path: str = "/") -> str:
+    """Check whether a cached SBOM already exists for a target — no scan, instant.
+
+    Read-only: never runs syft or SSH, returns immediately. Use this to answer
+    "is the SBOM available?" without triggering a scan. If cached, a later
+    suggest_v2 for the same target/scan_path reuses it (fast triage only).
+
+    Args:
+        target: SSH target (user@host), container image reference, or local path.
+        target_type: "ssh", "image", or "path". Auto-detected from target if omitted.
+        scan_path: Directory key on a remote SSH host (default "/"), or the SBOM
+                   file path if the cache was produced with remote_sbom. Ignored
+                   for image and path targets.
+
+    Returns:
+        JSON {"cached": true|false, "cache_file", ... and when cached:
+        "component_count", "size_bytes", "age_seconds"}.
+    """
+    started = time.perf_counter()
+    from redforge.commands.suggest_v2 import sbom_cache_status
+
+    try:
+        result = sbom_cache_status(target, target_type, scan_path)
+    except ValueError as exc:
+        return json.dumps({"error": True, "stage": "input_validation", "message": str(exc)}, indent=2)
+
+    _tool_log("sbom_cached", {"target": target, "scan_path": scan_path, "cached": result.get("cached")}, started, ok=True)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 def plan_insights(cves: list[dict], target_host: str) -> str:
     """Create a Red Hat Insights remediation plan for a list of CVEs on a specific host.
 
