@@ -298,9 +298,12 @@ def suggest_v2(
     Extends 'suggest' by adding SBOM generation. Auto-detects the target type
     from the value, or pass target_type explicitly.
 
-    A cached SBOM is reused automatically on repeated calls for the same target,
-    making demos and re-runs instant. Pass force=true to re-run syft and refresh
-    the cache.
+    ASYNC: this call returns immediately with {"status":"scanning","job_id":...}.
+    Poll suggest_v2_status(job_id) until it returns status="done" (or "error").
+    Triage runs on every call and can take 20-30s, so the work always happens in
+    the background to avoid agent-turn timeouts — even a cached SBOM is async.
+    A cached SBOM is reused on repeat calls (skips syft); pass force=true to
+    re-run syft and refresh the cache.
 
     Args:
         target: SSH target (user@host), container image reference, or local path.
@@ -317,15 +320,15 @@ def suggest_v2(
         force: Re-run syft even if a cached SBOM exists (default false).
         remote_sbom: SSH only. Treat scan_path as a pre-generated SBOM file on the
                      remote host: read it directly, never run syft, and never fall
-                     back to a scan. Errors loudly if the file can't be read. This
-                     is the deterministic, demo-safe way to use an existing SBOM,
-                     and it returns synchronously (no job_id) since the read is fast.
+                     back to a scan. Errors loudly if the file can't be read. The
+                     deterministic, demo-safe way to use an existing SBOM.
         debug_save_path: When set, write the raw SBOM JSON to this path for inspection.
 
     Returns:
-        JSON with summary, items, diagnostics (same structure as 'suggest')
-        plus a scan_metadata block. On scan failure, returns a structured error
-        object with stage="sbom_generation" instead of a triage result.
+        JSON with {"status":"scanning","job_id":...}. Call suggest_v2_status(job_id)
+        to retrieve the final result (summary, items, diagnostics, scan_metadata —
+        same structure as 'suggest') or a structured error with
+        stage="sbom_generation".
 
     SSH notes:
         The private key is read from SSH_KEY_PATH env var (e.g. /etc/ssh-key/id_ed25519).
@@ -334,8 +337,7 @@ def suggest_v2(
     """
     started = time.perf_counter()
     from redforge.commands.suggest_v2 import (
-        ScanError, detect_target_type, suggest_v2_core,
-        _cache_path, _load_cached_sbom,
+        ScanError, detect_target_type, suggest_v2_core, _cache_path,
     )
 
     ssh_key_path = os.environ.get("SSH_KEY_PATH", "/etc/ssh-key/id_ed25519")
@@ -348,41 +350,12 @@ def suggest_v2(
 
     args_summary = {"target": target, "target_type": resolved_type, "top_n": top_n, "scan_path": scan_path}
 
-    cache_file = _cache_path(target, resolved_type, scan_path)
-    cache_hit = (not force) and _load_cached_sbom(cache_file) is not None
-
-    # Run synchronously when we expect a fast path: a cache hit, or reading a
-    # pre-generated SBOM off the remote host. Both avoid a long blocking scan.
-    if cache_hit or remote_sbom:
-        try:
-            result = suggest_v2_core(
-                _config,
-                target=target,
-                target_type=target_type,
-                scan_path=scan_path,
-                top_n=top_n,
-                timeout=effective_timeout,
-                ssh_key_path=ssh_key_path,
-                debug_save_path=debug_save_path,
-                force=force,
-                remote_sbom=remote_sbom,
-            )
-            _tool_log("suggest_v2", args_summary, started, ok=True)
-            return json.dumps(result, indent=2)
-        except ScanError as exc:
-            _tool_log("suggest_v2", args_summary, started, ok=False, err=str(exc))
-            return json.dumps({
-                "error": True, "stage": "sbom_generation", "message": str(exc),
-                "exit_code": exc.exit_code, "stderr": exc.stderr, "hint": exc.hint,
-                "summary": None, "items": [], "diagnostics": {},
-                "scan_metadata": {"target": target, "target_type": resolved_type, "stage_reached": "sbom_generation"},
-            }, indent=2)
-        except Exception as exc:
-            _tool_log("suggest_v2", args_summary, started, ok=False, err=str(exc))
-            raise
-
-    # Cache miss (or force=True) → start background scan, return job_id immediately
+    # Always run in the background and return a job_id immediately. Triage runs
+    # on every call (even on a cached SBOM) and can take 20-30s, which exceeds
+    # the playground's agent-turn timeout — so we never block the tool call here.
+    # The caller polls suggest_v2_status; each poll is sub-second.
     job_id = str(uuid.uuid4())
+    cache_file = _cache_path(target, resolved_type, scan_path)
     _scan_jobs[job_id] = {
         "status": "running",
         "started": time.time(),
@@ -403,6 +376,7 @@ def suggest_v2(
                 ssh_key_path=ssh_key_path,
                 debug_save_path=debug_save_path,
                 force=force,
+                remote_sbom=remote_sbom,
             )
             _scan_jobs[job_id]["result"] = result
             _scan_jobs[job_id]["status"] = "done"

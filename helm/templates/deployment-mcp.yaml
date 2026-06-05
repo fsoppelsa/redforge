@@ -68,10 +68,12 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              memory: "128Mi"
+              memory: "256Mi"
               cpu: "50m"
             limits:
-              memory: "512Mi"
+              # Full-host SBOMs are held in memory (subprocess capture + json
+              # parse + cache re-serialize), which OOM-killed the old 512Mi pod.
+              memory: "2Gi"
               cpu: "250m"
       volumes:
         - name: data
