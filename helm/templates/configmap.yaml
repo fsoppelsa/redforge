@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redforge-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" . | nindent 4 }}
+data:
+  redforge.toml: |
+    [products.rhel]
+    name     = "Red Hat Enterprise Linux"
+    versions = ["8", "9", "10"]
+
+    [products.ocp]
+    name     = "Red Hat OpenShift Container Platform"
+    versions = ["4.16", "4.17", "4.18", "4.19", "4.20", "4.21", "4.22"]
+
+    [products.aap]
+    name     = "Red Hat Ansible Automation Platform"
+    versions = ["2.3", "2.4", "2.5", "2.6"]
+
+    [products.osp]
+    name     = "Red Hat OpenStack Platform"
+    versions = ["16.1", "17.1", "18.0"]
+
+    [products.rhacm]
+    name     = "Red Hat Advanced Cluster Management for Kubernetes"
+    versions = ["2.10", "2.11", "2.12"]
+
+    [products.rhacs]
+    name     = "Red Hat Advanced Cluster Security for Kubernetes"
+    versions = ["4.4", "4.5", "4.6"]
+
+    [products.rhaiis]
+    name     = "Red Hat AI Inference Server"
+    versions = ["3.0", "3.1"]
+
+    [products.eap]
+    name     = "Red Hat JBoss Enterprise Application Platform"
+    versions = ["7.4", "8.0"]
+
+    [products.keycloak]
+    name     = "Red Hat build of Keycloak"
+    versions = ["22", "24", "26"]
+
+    [products.quay]
+    name     = "Red Hat Quay"
+    versions = ["3.10", "3.11", "3.12"]
+
+    [sources]
+    redhat_cve         = "https://access.redhat.com/hydra/rest/securitydata/cve.json"
+    kev                = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    metasploit         = "https://raw.githubusercontent.com/rapid7/metasploit-framework/master/db/modules_metadata_base.json"
+    exploitdb          = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+    packetstorm        = "https://packetstormsecurity.com/feeds/files.xml"
+    github_advisory_db = "https://codeload.github.com/github/advisory-database/tar.gz/refs/heads/main"
+    nvd_cvss           = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    epss               = "https://epss.cyentia.com/epss_scores-current.csv.gz"
+
+    [credentials]
+    # Value overridden at runtime by the NVD_API_KEY environment variable
+    nvd_api_key = ""
+
+    [pipeline]
+    per_page  = {{ .Values.pipeline.perPage }}
+    max_pages = {{ .Values.pipeline.maxPages }}
+    data_dir  = "/app/data/raw"
+    rdf_dir   = "/app/data/rdf"

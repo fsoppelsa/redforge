@@ -1,0 +1,9 @@
+localModelRoutes:
+  - name: qwen3-14b-api
+    servicePort: 8000
+    targetIP: 192.168.122.1
+    targetPort: 18082
+  - name: qwen3-14b-filtered
+    servicePort: 8001
+    targetIP: 192.168.122.1
+    targetPort: 18083

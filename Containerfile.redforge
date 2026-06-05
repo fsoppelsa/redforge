@@ -1,0 +1,64 @@
+# RedForge — Red Hat UBI9 container
+#
+# Build:
+#   podman build -f Containerfile.redforge -t redforge:0.1.0 .
+#
+# Run MCP server:
+#   podman run --rm -p 8000:8000 \
+#     -v ./redforge.toml:/app/redforge.toml:ro \
+#     -v redforge-data:/app/data \
+#     redforge:0.1.0
+#
+# Run Streamlit dashboard:
+#   podman run --rm -p 8501:8501 \
+#     -v ./redforge.toml:/app/redforge.toml:ro \
+#     -v redforge-data:/app/data \
+#     redforge:0.1.0 server
+
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+LABEL org.opencontainers.image.title="RedForge" \
+      org.opencontainers.image.description="CVE intelligence for Red Hat products — reusable runtime for MCP and dashboard services" \
+      org.opencontainers.image.source="https://github.com/fsoppelsa/opendata"
+
+# ── App layout ────────────────────────────────────────────────────────────────
+
+WORKDIR /app
+
+# Install Python dependencies before copying source so this layer is cached
+# TODO: pin versions for reproducibility once deps are stable
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source tree
+COPY src/       src/
+COPY datakit/   datakit/
+COPY app.py     .
+COPY docs/img/  docs/img/
+COPY redforge.py .
+
+# Runtime directories (override data/ with a volume in production)
+USER 0
+RUN mkdir -p /app/data/cache /app/data/rdf \
+    && chown -R 1001:0 /app \
+    && chmod -R g=u /app
+USER 1001
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+# Mount a real redforge.toml at runtime; this provides a safe fallback
+COPY redforge.toml.example /app/redforge.toml
+
+ENV REDFORGE_CONFIG=/app/redforge.toml
+
+# ── Ports ─────────────────────────────────────────────────────────────────────
+
+# 8000 — MCP server (HTTP transport)
+# 8501 — Streamlit dashboard
+EXPOSE 8000
+EXPOSE 8501
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+
+# Default: MCP over HTTP. Compose overrides this per service for web and MCP.
+CMD ["python", "redforge.py", "mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "8000"]

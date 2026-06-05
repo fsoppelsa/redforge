@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  redforge-web:
+    build:
+      context: .
+      dockerfile: Containerfile.redforge
+    image: redforge:0.1.0
+    container_name: redforge-web
+    command: ["python", "redforge.py", "server", "--host", "0.0.0.0", "--port", "8501"]
+    environment:
+      REDFORGE_CONFIG: /app/redforge.toml
+      REDFORGE_SPARQL_ENDPOINT: http://virtuoso:8890/sparql
+      REDFORGE_SPARQL_GRAPH: ${VIRTUOSO_DEFAULT_GRAPH:-http://redforge.local/graph/main}
+    volumes:
+      - ./redforge.toml:/app/redforge.toml:ro
+      - ./data:/app/data:Z
+    ports:
+      - "8501:8501"
+    depends_on:
+      - virtuoso
+    restart: unless-stopped
+
+  redforge-mcp:
+    build:
+      context: .
+      dockerfile: Containerfile.redforge
+    image: redforge:0.1.0
+    container_name: redforge-mcp
+    command: ["python", "redforge.py", "mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      REDFORGE_CONFIG: /app/redforge.toml
+    volumes:
+      - ./redforge.toml:/app/redforge.toml:ro
+      - ./data:/app/data:Z
+    ports:
+      - "8000:8000"
+    depends_on:
+      - virtuoso
+    restart: unless-stopped
+
+  virtuoso:
+    image: openlink/virtuoso-opensource-7:latest
+    container_name: virtuoso
+    environment:
+      DBA_PASSWORD: ${VIRTUOSO_DBA_PASSWORD:-dba}
+      SPARQL_UPDATE: "true"
+      DEFAULT_GRAPH: ${VIRTUOSO_DEFAULT_GRAPH:-http://redforge.local/graph/main}
+    volumes:
+      - virtuoso-data:/database:Z
+      - ./data/rdf:/database/import:ro,Z
+    ports:
+      - "8890:8890"
+      - "1111:1111"
+    restart: unless-stopped
+
+  pellet:
+    image: stain/jena-fuseki:latest
+    container_name: pellet
+    environment:
+      ADMIN_PASSWORD: ${PELLET_ADMIN_PASSWORD:-admin}
+      FUSEKI_DATASET_1: redforge
+    volumes:
+      - ./data/rdf:/data/rdf:ro,Z
+      - pellet-data:/fuseki:Z
+    ports:
+      - "3030:3030"
+    restart: unless-stopped
+
+volumes:
+  virtuoso-data:
+  pellet-data:

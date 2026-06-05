@@ -1,0 +1,20 @@
+{{- range .Values.localModelRoutes }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" $ | nindent 4 }}
+    redforge.local-model-route: {{ .name | quote }}
+spec:
+  to:
+    kind: Service
+    name: {{ .name }}
+  port:
+    targetPort: http
+  tls:
+    termination: {{ $.Values.routes.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ $.Values.routes.tls.insecurePolicy }}
+---
+{{- end }}

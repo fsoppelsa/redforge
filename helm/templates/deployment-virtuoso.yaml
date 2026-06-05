@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redforge-virtuoso
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: virtuoso
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redforge-virtuoso
+  template:
+    metadata:
+      labels:
+        app: redforge-virtuoso
+        {{- include "redforge.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      # Virtuoso OSS runs as root; requires anyuid SCC on OpenShift.
+      # Grant before installing: oc adm policy add-scc-to-user anyuid -z redforge -n <namespace>
+      containers:
+        - name: virtuoso
+          image: {{ .Values.virtuoso.image }}
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: DBA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redforge-virtuoso
+                  key: dba-password
+            - name: SPARQL_UPDATE
+              value: "true"
+            - name: DEFAULT_GRAPH
+              value: {{ .Values.virtuoso.graphUri | quote }}
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    ISQL=/opt/virtuoso-opensource/bin/isql
+                    for i in $(seq 1 30); do
+                      $ISQL 1111 dba "$DBA_PASSWORD" exec="SELECT 1;" >/dev/null 2>&1 && break
+                      sleep 5
+                    done
+                    $ISQL 1111 dba "$DBA_PASSWORD" exec="DB.DBA.RDF_DEFAULT_USER_PERMS_SET ('nobody', 7);"
+                    $ISQL 1111 dba "$DBA_PASSWORD" exec="DB.DBA.RDF_DEFAULT_USER_PERMS_SET ('SPARQL', 7);"
+                    $ISQL 1111 dba "$DBA_PASSWORD" exec='GRANT EXECUTE ON DB.DBA.TTLP_RL_NEW_GRAPH TO "SPARQL";'
+                    $ISQL 1111 dba "$DBA_PASSWORD" exec='GRANT EXECUTE ON DB.DBA.TTLP_RL TO "SPARQL";'
+                    $ISQL 1111 dba "$DBA_PASSWORD" exec='GRANT EXECUTE ON DB.DBA.TTLP TO "SPARQL";'
+          ports:
+            - name: http
+              containerPort: 8890
+            - name: isql
+              containerPort: 1111
+          volumeMounts:
+            - name: db
+              mountPath: /database
+          readinessProbe:
+            httpGet:
+              path: /sparql
+              port: 8890
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+      volumes:
+        - name: db
+          persistentVolumeClaim:
+            claimName: redforge-virtuoso-db

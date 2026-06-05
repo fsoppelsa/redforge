@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redforge-mcp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redforge-mcp
+  template:
+    metadata:
+      labels:
+        app: redforge-mcp
+        {{- include "redforge.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        fsGroup: 1001
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
+      containers:
+        - name: mcp
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "redforge.py", "mcp", "--transport", "{{ .Values.mcp.transport }}", "--host", "0.0.0.0", "--port", "8000"]
+          env:
+            - name: REDFORGE_CONFIG
+              value: /etc/redforge/redforge.toml
+            - name: NVD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: redforge-credentials
+                  key: nvd-api-key
+            {{- if .Values.mcp.rhOfflineToken.enabled }}
+            - name: {{ .Values.mcp.rhOfflineToken.envVar | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mcp.rhOfflineToken.secretName | quote }}
+                  key: {{ .Values.mcp.rhOfflineToken.secretKey | quote }}
+            {{- end }}
+            - name: REDFORGE_SPARQL_ENDPOINT
+              value: {{ include "redforge.sparqlEndpoint" . | quote }}
+            - name: REDFORGE_SPARQL_GRAPH
+              value: {{ .Values.virtuoso.graphUri | quote }}
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: config
+              mountPath: /etc/redforge
+            {{- if .Values.mcp.sshKey.enabled }}
+            - name: ssh-key
+              mountPath: {{ .Values.mcp.sshKey.mountPath | quote }}
+              readOnly: true
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: redforge-data
+        - name: config
+          configMap:
+            name: redforge-config
+        {{- if .Values.mcp.sshKey.enabled }}
+        - name: ssh-key
+          secret:
+            secretName: {{ .Values.mcp.sshKey.secretName | quote }}
+            defaultMode: {{ .Values.mcp.sshKey.defaultMode }}
+        {{- end }}

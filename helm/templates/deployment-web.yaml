@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redforge-web
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redforge-web
+  template:
+    metadata:
+      labels:
+        app: redforge-web
+        {{- include "redforge.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        fsGroup: 1001
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
+      containers:
+        - name: web
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "redforge.py", "server", "--host", "0.0.0.0", "--port", "8501"]
+          env:
+            - name: REDFORGE_CONFIG
+              value: /etc/redforge/redforge.toml
+            - name: NVD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: redforge-credentials
+                  key: nvd-api-key
+            - name: REDFORGE_SPARQL_ENDPOINT
+              value: {{ include "redforge.sparqlEndpoint" . | quote }}
+            - name: REDFORGE_SPARQL_GRAPH
+              value: {{ .Values.virtuoso.graphUri | quote }}
+          ports:
+            - name: http
+              containerPort: 8501
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: config
+              mountPath: /etc/redforge
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8501
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: redforge-data
+        - name: config
+          configMap:
+            name: redforge-config

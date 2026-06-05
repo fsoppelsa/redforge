@@ -1,0 +1,103 @@
+# RedForge configuration
+# Copy to redforge.toml and fill in your credentials.
+
+# ── Products ──────────────────────────────────────────────────────────────────
+# Structure: [products.<label>]  ->  name + versions
+# short = label + version.replace(".", "")  e.g. rhel + 8 = rhel8, ocp + 4.16 = ocp416
+
+[products.rhel]
+name     = "Red Hat Enterprise Linux"
+versions = ["8", "9", "10"]
+
+[products.ocp]
+name     = "Red Hat OpenShift Container Platform"
+versions = ["4.16", "4.17", "4.18", "4.19", "4.20", "4.21", "4.22"]
+
+[products.aap]
+name     = "Red Hat Ansible Automation Platform"
+versions = ["2.3", "2.4", "2.5", "2.6"]
+
+[products.osp]
+name     = "Red Hat OpenStack Platform"
+versions = ["16.1", "17.1", "18.0"]
+
+[products.rhacm]
+name     = "Red Hat Advanced Cluster Management for Kubernetes"
+versions = ["2.10", "2.11", "2.12"]
+
+[products.rhacs]
+name     = "Red Hat Advanced Cluster Security for Kubernetes"
+versions = ["4.4", "4.5", "4.6"]
+
+[products.rhaiis]
+name     = "Red Hat AI Inference Server"
+versions = ["3.0", "3.1"]
+
+[products.camel]
+name     = "Red Hat build of Apache Camel"
+versions = ["4.4", "4.8", "4.10"]
+
+[products.ceph]
+name     = "Red Hat Ceph Storage"
+versions = ["6", "7", "8"]
+
+[products.datagrid]
+name     = "Red Hat Data Grid"
+versions = ["8.4", "8.5", "8.6"]
+
+[products.rhelai]
+name     = "Red Hat Enterprise Linux AI"
+versions = ["1.1", "1.2", "1.3"]
+
+[products.fuse]
+name     = "Red Hat Fuse"
+versions = ["7.11", "7.12", "7.13"]
+
+[products.eap]
+name     = "Red Hat JBoss Enterprise Application Platform"
+versions = ["7.4", "8.0"]
+
+[products.keycloak]
+name     = "Red Hat build of Keycloak"
+versions = ["22", "24", "26"]
+
+[products.quarkus]
+name     = "Red Hat build of Quarkus"
+versions = ["3.8", "3.15", "3.20"]
+
+[products.quay]
+name     = "Red Hat Quay"
+versions = ["3.10", "3.11", "3.12"]
+
+[products.satellite]
+name     = "Red Hat Satellite"
+versions = ["6.13", "6.14", "6.15"]
+
+[products.kafka]
+name     = "Red Hat Streams for Apache Kafka"
+versions = ["2.6", "2.7", "2.8"]
+
+# ── Data sources ───────────────────────────────────────────────────────────────
+
+[sources]
+redhat_cve  = "https://access.redhat.com/hydra/rest/securitydata/cve.json"
+kev         = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+metasploit  = "https://raw.githubusercontent.com/rapid7/metasploit-framework/master/db/modules_metadata_base.json"
+exploitdb   = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+packetstorm = "https://packetstormsecurity.com/feeds/files.xml"
+github_advisory_db = "https://codeload.github.com/github/advisory-database/tar.gz/refs/heads/main"
+nvd_cvss    = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+epss        = "https://epss.cyentia.com/epss_scores-current.csv.gz"
+
+# ── Credentials ────────────────────────────────────────────────────────────────
+
+[credentials]
+nvd_api_key = ""   # https://nvd.nist.gov/developers/request-an-api-key
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+
+[pipeline]
+per_page    = 100
+max_pages   = 50
+data_dir    = "data/raw"
+rdf_dir     = "data/rdf"

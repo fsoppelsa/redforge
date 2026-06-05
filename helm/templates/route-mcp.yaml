@@ -1,0 +1,20 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: redforge-mcp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+  annotations:
+    # SSE requires long-lived connections; syft scans can take 10-20 min on a full host
+    haproxy.router.openshift.io/timeout: {{ .Values.routes.mcpTimeout }}
+spec:
+  to:
+    kind: Service
+    name: redforge-mcp
+  port:
+    targetPort: http
+  tls:
+    termination: {{ .Values.routes.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ .Values.routes.tls.insecurePolicy }}

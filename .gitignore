@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+data/
+logs/
+*.log
+sboms/*.tar
+current.md
+tmp/
+claude-mcp-logs.txt
+mcp-snippet.json
+redforge.toml

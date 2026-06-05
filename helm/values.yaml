@@ -1,0 +1,93 @@
+# RedForge Helm values
+#
+# Install:
+#   helm install redforge ./helm \
+#     --namespace redforge --create-namespace \
+#     --set credentials.nvdApiKey=<your-key>
+#
+# OpenShift NOTE: the Virtuoso pod runs as root (upstream image).
+# Grant anyuid SCC to the service account before installing:
+#   oc adm policy add-scc-to-serviceaccount anyuid -z redforge -n <namespace>
+
+image:
+  repository: quay.io/fsoppelsa/redforge
+  tag: "0.2.0"
+  pullPolicy: IfNotPresent
+  # Set to the name of a docker-registry secret if the image is private.
+  # Create it with:
+  #   kubectl create secret docker-registry redforge-pull-secret \
+  #     --docker-server=quay.io --docker-username=<user> --docker-password=<token> \
+  #     -n redforge
+  pullSecret: ""
+
+credentials:
+  nvdApiKey: ""
+
+virtuoso:
+  image: openlink/virtuoso-opensource-7:latest
+  dbaPassword: "dba"
+  graphUri: "http://redforge.local/graph/main"
+
+pipeline:
+  perPage: 100
+  # Reduce maxPages for a quick demo; bump to 500+ for a full dataset
+  maxPages: 10
+
+storage:
+  # lvms-vg1 uses topolvm.io (node-local LVM) — ReadWriteOnce only.
+  # All pods must land on the same node, which is the case on SNO.
+  data:
+    size: 1Gi
+    accessMode: ReadWriteOnce
+    storageClass: "lvms-vg1"
+  virtuoso:
+    size: 1Gi
+    accessMode: ReadWriteOnce
+    storageClass: "lvms-vg1"
+
+routes:
+  tls:
+    termination: edge
+    insecurePolicy: Redirect
+  # HAProxy timeout for the MCP route.
+  # Must be long enough to cover syft scans (full-host SSH scans can take 10-20 min).
+  mcpTimeout: 3600s
+
+mcp:
+  # Use SSE so the exposed route serves the documented /sse MCP endpoint.
+  transport: sse
+  # Optional: mount an SSH key Secret into the MCP container.
+  # Use this if you want MCP tools to SSH into remote targets.
+  # NOTE: Kubernetes `defaultMode` is an integer. For `0400` (octal), use `256` (decimal).
+  sshKey:
+    enabled: false
+    secretName: redforge-ssh-key
+    mountPath: /etc/ssh-key
+    defaultMode: 256
+  # Red Hat offline token (for Insights / Lightspeed flows).
+  # Helm creates the Secret automatically. Populate the token at install time:
+  #   helm install redforge ./helm ... --set mcp.rhOfflineToken.token=<your-token>
+  # Or patch it after install without re-deploying:
+  #   kubectl patch secret redforge-rh-offline-token -n redforge \
+  #     --type=merge -p '{"stringData":{"RH_OFFLINE_TOKEN":"<your-token>"}}'
+  rhOfflineToken:
+    enabled: true
+    secretName: redforge-rh-offline-token
+    secretKey: RH_OFFLINE_TOKEN
+    envVar: RH_OFFLINE_TOKEN
+    token: ""
+
+serviceAccount:
+  name: redforge
+
+localModelRoutes: []
+# Example:
+# localModelRoutes:
+#   - name: qwen3-14b-api
+#     servicePort: 8000
+#     targetIP: 192.168.1.47
+#     targetPort: 18080
+#   - name: qwen3-14b-filtered
+#     servicePort: 8001
+#     targetIP: 192.168.1.47
+#     targetPort: 18081

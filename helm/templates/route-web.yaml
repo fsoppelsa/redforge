@@ -1,0 +1,20 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: redforge-web
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  annotations:
+    # Allow long-lived WebSocket connections for Streamlit
+    haproxy.router.openshift.io/timeout: 300s
+spec:
+  to:
+    kind: Service
+    name: redforge-web
+  port:
+    targetPort: http
+  tls:
+    termination: {{ .Values.routes.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ .Values.routes.tls.insecurePolicy }}

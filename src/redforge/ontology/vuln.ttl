@@ -1,0 +1,512 @@
+@prefix vs:      <http://redforge.local/ontology#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+
+# ============================================================================
+# RedForge OWL Ontology
+# ============================================================================
+#
+# This file describes the semantic model used to represent CVEs, Red Hat
+# products, CVSS metrics, KEV entries, public exploits, and upstream software
+# concepts.
+#
+# Core idea:
+# - The centre of the graph is the vulnerability
+# - Each vulnerability is linked to a product, severity, CVSS score, and
+#   operational threat signals
+# - The model uses OWL not just as a label dictionary but also to express
+#   hierarchies, inverse properties, cardinalities, and disjoint classes
+#
+# ── Ontology metadata ────────────────────────────────────────────────────
+
+<http://redforge.local/ontology>
+    a owl:Ontology ;
+    rdfs:label      "RedForge Vulnerability Ontology" ;
+    rdfs:comment    "An OWL ontology for vulnerability intelligence, linking CVE records, CVSS metrics, products, exploits, and upstream software projects." ;
+    owl:versionInfo "1.2.0" ;
+    dcterms:creator "RedForge Project" ;
+    dcterms:created "2026-05-22"^^xsd:date .
+
+# External property declarations used in OWL axioms.
+# Instead of reinventing everything locally, we reuse shared terms where
+# it makes sense.
+
+# ── External property declarations used in OWL axioms ─────────────────────
+
+dcterms:identifier a owl:DatatypeProperty ;
+    rdfs:label   "identifier" ;
+    rdfs:comment "Canonical external identifier literal used for CVE IDs in this ontology." ;
+    rdfs:range   xsd:string .
+
+dcterms:issued a owl:DatatypeProperty ;
+    rdfs:label   "issued" ;
+    rdfs:comment "Publication date for a vulnerability record." ;
+    rdfs:range   xsd:date .
+
+rdfs:seeAlso a owl:AnnotationProperty ;
+    rdfs:comment "Used on vulnerabilities to link to a human-facing reference page such as the canonical Red Hat CVE page." .
+
+# ============================================================================
+# Main classes
+# ============================================================================
+#
+# The following classes represent the fundamental domain concepts:
+# - vs:Vulnerability is the central node
+# - vs:CVSSMetric models the technical score
+# - vs:Product models what is affected
+# - vs:ExploitModule and vs:KEVEntry model real-world threat signals
+#
+# ── Classes ───────────────────────────────────────────────────────────────
+
+vs:Vulnerability a owl:Class ;
+    rdfs:label   "Vulnerability" ;
+    rdfs:comment "A software vulnerability identified by a CVE identifier." ;
+    rdfs:subClassOf
+        [
+            a owl:Restriction ;
+            owl:onProperty dcterms:identifier ;
+            owl:minCardinality "1"^^xsd:nonNegativeInteger
+        ],
+        [
+            a owl:Restriction ;
+            owl:onProperty vs:affectsProduct ;
+            owl:minCardinality "1"^^xsd:nonNegativeInteger
+        ] .
+
+# A vulnerability is recognised as "actively exploited" not by manual label
+# but by graph structure: having a KEV entry or at least one exploit.
+vs:ActivelyExploitedVulnerability a owl:Class ;
+    rdfs:subClassOf vs:Vulnerability ;
+    owl:equivalentClass [
+        a owl:Class ;
+        owl:intersectionOf (
+            vs:Vulnerability
+            [
+                a owl:Class ;
+                owl:unionOf (
+                    [
+                        a owl:Restriction ;
+                        owl:onProperty vs:hasKEVEntry ;
+                        owl:someValuesFrom vs:KEVEntry
+                    ]
+                    [
+                        a owl:Restriction ;
+                        owl:onProperty vs:hasExploit ;
+                        owl:someValuesFrom vs:ExploitModule
+                    ]
+                )
+            ]
+        )
+    ] ;
+    rdfs:label   "Actively Exploited Vulnerability" ;
+    rdfs:comment "A vulnerability with evidence of active exploitation, such as a KEV entry or a known public exploit." .
+
+# The complementary class: a known vulnerability with no exploitation evidence
+# in the current dataset.
+vs:LatentVulnerability a owl:Class ;
+    rdfs:subClassOf vs:Vulnerability ;
+    owl:disjointWith vs:ActivelyExploitedVulnerability ;
+    rdfs:label   "Latent Vulnerability" ;
+    rdfs:comment "A known vulnerability with no recorded exploitation evidence in the current graph." .
+
+vs:CVSSMetric a owl:Class ;
+    rdfs:label   "CVSS Metric" ;
+    rdfs:comment "A CVSS scoring record attached to a vulnerability." ;
+    rdfs:subClassOf
+        [
+            a owl:Restriction ;
+            owl:onProperty vs:baseScore ;
+            owl:minCardinality "1"^^xsd:nonNegativeInteger
+        ],
+        [
+            a owl:Restriction ;
+            owl:onProperty vs:cvssVersion ;
+            owl:minCardinality "1"^^xsd:nonNegativeInteger
+        ],
+        [
+            a owl:Restriction ;
+            owl:onProperty vs:baseSeverity ;
+            owl:cardinality "1"^^xsd:nonNegativeInteger
+        ] .
+
+# CVSS version subclasses keep the door open for multiple standard versions
+# without losing the common parent type.
+vs:CVSSv3Metric a owl:Class ;
+    rdfs:subClassOf vs:CVSSMetric ;
+    owl:disjointWith vs:CVSSv4Metric ;
+    rdfs:label   "CVSS v3 Metric" ;
+    rdfs:comment "A CVSS metric expressed using the CVSS v3.x specification." .
+
+vs:CVSSv4Metric a owl:Class ;
+    rdfs:subClassOf vs:CVSSMetric ;
+    rdfs:label   "CVSS v4 Metric" ;
+    rdfs:comment "A CVSS metric expressed using the CVSS v4.x specification." .
+
+vs:Severity a owl:Class ;
+    owl:equivalentClass [
+        a owl:Class ;
+        owl:oneOf (
+            vs:NoneSeverity
+            vs:LowSeverity
+            vs:MediumSeverity
+            vs:HighSeverity
+            vs:CriticalSeverity
+        )
+    ] ;
+    rdfs:label   "Severity" ;
+    rdfs:comment "A controlled vocabulary of qualitative severity ratings." .
+
+# Product is intentionally abstract. The subclasses below help improve SPARQL
+# queries and distinguish product families with different operational meaning.
+vs:Product a owl:Class ;
+    rdfs:label   "Product" ;
+    rdfs:comment "A software product or platform affected by a vulnerability." .
+
+vs:OperatingSystem a owl:Class ;
+    rdfs:subClassOf vs:Product ;
+    rdfs:label   "Operating System" ;
+    rdfs:comment "An operating system product, such as RHEL." .
+
+vs:Middleware a owl:Class ;
+    rdfs:subClassOf vs:Product ;
+    owl:disjointWith vs:OperatingSystem, vs:ContainerPlatform, vs:SecurityProduct,
+        vs:DataPlatform, vs:ManagementPlatform, vs:CloudPlatform ;
+    rdfs:label   "Middleware" ;
+    rdfs:comment "A middleware product such as JBoss EAP or Quarkus." .
+
+vs:ContainerPlatform a owl:Class ;
+    rdfs:subClassOf vs:Product ;
+    owl:disjointWith vs:OperatingSystem, vs:SecurityProduct, vs:DataPlatform,
+        vs:ManagementPlatform, vs:CloudPlatform ;
+    rdfs:label   "Container Platform" ;
+    rdfs:comment "A container platform such as OpenShift or Quay." .
+
+vs:SecurityProduct a owl:Class ;
+    rdfs:subClassOf vs:Product ;
+    owl:disjointWith vs:OperatingSystem, vs:DataPlatform, vs:ManagementPlatform,
+        vs:CloudPlatform ;
+    rdfs:label   "Security Product" ;
+    rdfs:comment "A product focused on security functions, such as Keycloak or RHACS." .
+
+vs:DataPlatform a owl:Class ;
+    rdfs:subClassOf vs:Product ;
+    owl:disjointWith vs:OperatingSystem, vs:ManagementPlatform, vs:CloudPlatform ;
+    rdfs:label   "Data Platform" ;
+    rdfs:comment "A data platform such as Ceph, Data Grid, or Kafka." .
+
+vs:ManagementPlatform a owl:Class ;
+    rdfs:subClassOf vs:Product ;
+    owl:disjointWith vs:OperatingSystem, vs:CloudPlatform ;
+    rdfs:label   "Management Platform" ;
+    rdfs:comment "A management platform such as Ansible, Satellite, or RHACM." .
+
+vs:CloudPlatform a owl:Class ;
+    rdfs:subClassOf vs:Product ;
+    owl:disjointWith vs:OperatingSystem ;
+    rdfs:label   "Cloud Platform" ;
+    rdfs:comment "A cloud platform such as OpenStack." .
+
+vs:OperatingSystem owl:disjointWith vs:Middleware, vs:ContainerPlatform,
+    vs:SecurityProduct, vs:DataPlatform, vs:ManagementPlatform, vs:CloudPlatform .
+
+# KEV and exploits are modelled as separate entities from the vulnerability.
+# This enables richer graph queries and source-specific metadata.
+vs:KEVEntry a owl:Class ;
+    rdfs:label   "KEV Entry" ;
+    rdfs:comment "An entry in the CISA Known Exploited Vulnerabilities catalog." .
+
+vs:ExploitModule a owl:Class ;
+    rdfs:label   "Exploit Module" ;
+    rdfs:comment "A public exploit module or exploit reference targeting a vulnerability." .
+
+vs:MetasploitModule a owl:Class ;
+    rdfs:subClassOf vs:ExploitModule ;
+    owl:disjointWith vs:ExploitDBModule, vs:PacketStormModule, vs:GitHubAdvisoryModule ;
+    rdfs:label   "Metasploit Module" ;
+    rdfs:comment "An exploit module published by Metasploit." .
+
+vs:ExploitDBModule a owl:Class ;
+    rdfs:subClassOf vs:ExploitModule ;
+    owl:disjointWith vs:PacketStormModule, vs:GitHubAdvisoryModule ;
+    rdfs:label   "ExploitDB Module" ;
+    rdfs:comment "An exploit reference coming from Exploit-DB." .
+
+vs:PacketStormModule a owl:Class ;
+    rdfs:subClassOf vs:ExploitModule ;
+    owl:disjointWith vs:GitHubAdvisoryModule ;
+    rdfs:label   "Packet Storm Module" ;
+    rdfs:comment "An exploit reference coming from Packet Storm Security." .
+
+vs:GitHubAdvisoryModule a owl:Class ;
+    rdfs:subClassOf vs:ExploitModule ;
+    rdfs:label   "GitHub Advisory Module" ;
+    rdfs:comment "An exploit or advisory reference coming from GitHub Advisory Database." .
+
+# Upstream interlinking: not everything revolves around the Red Hat product,
+# but also the upstream software or project that is actually vulnerable.
+vs:SoftwareArtifact a owl:Class ;
+    rdfs:label   "Software Artifact" ;
+    rdfs:comment "A software entity used for upstream interlinking." .
+
+vs:UpstreamProject a owl:Class ;
+    rdfs:subClassOf vs:SoftwareArtifact ;
+    owl:disjointWith vs:ReleaseLine ;
+    rdfs:label   "Upstream Project" ;
+    rdfs:comment "An upstream software project such as Apache HTTP Server or Kubernetes." .
+
+vs:ReleaseLine a owl:Class ;
+    rdfs:subClassOf vs:SoftwareArtifact,
+        [
+            a owl:Restriction ;
+            owl:onProperty vs:releaseOf ;
+            owl:qualifiedCardinality "1"^^xsd:nonNegativeInteger ;
+            owl:onClass vs:UpstreamProject
+        ] ;
+    rdfs:label   "Release Line" ;
+    rdfs:comment "A release family such as Apache HTTP Server 2.4.x or nginx 1.30.x." .
+
+# ============================================================================
+# Severity individuals
+# ============================================================================
+#
+# Severity is not a free-form string but a closed controlled vocabulary.
+# This makes both the model and the queries more stable.
+#
+# ── Severity individuals (controlled vocabulary) ──────────────────────────
+
+vs:NoneSeverity a vs:Severity ;
+    rdfs:label   "None" ;
+    rdfs:comment "CVSS qualitative severity: None (base score 0.0)." .
+
+vs:LowSeverity a vs:Severity ;
+    rdfs:label   "Low" ;
+    rdfs:comment "CVSS qualitative severity: Low (base score 0.1–3.9)." .
+
+vs:MediumSeverity a vs:Severity ;
+    rdfs:label   "Medium" ;
+    rdfs:comment "CVSS qualitative severity: Medium (base score 4.0–6.9)." .
+
+vs:HighSeverity a vs:Severity ;
+    rdfs:label   "High" ;
+    rdfs:comment "CVSS qualitative severity: High (base score 7.0–8.9)." .
+
+vs:CriticalSeverity a vs:Severity ;
+    rdfs:label   "Critical" ;
+    rdfs:comment "CVSS qualitative severity: Critical (base score 9.0–10.0)." .
+
+# ============================================================================
+# Datatype properties
+# ============================================================================
+#
+# These properties carry literal values: identifiers, dates, numeric scores,
+# and simple labels. Some properties are kept only for historical compatibility
+# and marked as deprecated.
+#
+# ── Datatype properties ───────────────────────────────────────────────────
+
+vs:cveId a owl:DatatypeProperty ;
+    rdfs:label   "CVE ID" ;
+    rdfs:comment "Legacy CVE identifier property. dcterms:identifier is preferred for new data." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   xsd:string .
+
+vs:severityLabel a owl:DatatypeProperty ;
+    rdfs:label   "Severity label" ;
+    rdfs:comment "A plain-text severity label kept for convenience when ingesting text-only sources." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   xsd:string .
+
+vs:priorityClass a owl:DatatypeProperty ;
+    rdfs:label   "Priority class" ;
+    rdfs:comment "The pipeline-assigned priority band, for example 1-Act or 4-Defer." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   xsd:string .
+
+vs:priorityScore a owl:DatatypeProperty ;
+    rdfs:label   "Priority score" ;
+    rdfs:comment "The numeric pipeline-assigned ranking score used to sort vulnerabilities." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   xsd:decimal .
+
+vs:publicDate a owl:DatatypeProperty ;
+    owl:deprecated true ;
+    rdfs:label   "Public date (deprecated)" ;
+    rdfs:comment "Deprecated. Use dcterms:issued instead." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   xsd:dateTime .
+
+vs:baseScore a owl:DatatypeProperty ;
+    rdfs:label   "Base score" ;
+    rdfs:comment "The numeric CVSS base score." ;
+    rdfs:domain  vs:CVSSMetric ;
+    rdfs:range   xsd:decimal .
+
+vs:vectorString a owl:DatatypeProperty ;
+    rdfs:label   "Vector string" ;
+    rdfs:comment "The CVSS vector string." ;
+    rdfs:domain  vs:CVSSMetric ;
+    rdfs:range   xsd:string .
+
+vs:cvssVersion a owl:DatatypeProperty ;
+    rdfs:label   "CVSS version" ;
+    rdfs:comment "The CVSS specification version, for example 3.1 or 4.0." ;
+    rdfs:domain  vs:CVSSMetric ;
+    rdfs:range   xsd:string .
+
+vs:cvssScore a owl:DatatypeProperty ;
+    owl:deprecated true ;
+    rdfs:label   "CVSS score (deprecated)" ;
+    rdfs:comment "Deprecated. Use vs:hasCvssMetric / vs:baseScore instead." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   xsd:decimal .
+
+vs:releaseLineLabel a owl:DatatypeProperty ;
+    rdfs:label   "Release line label" ;
+    rdfs:comment "A human-readable label for a release line, such as 2.4.x." ;
+    rdfs:domain  vs:ReleaseLine ;
+    rdfs:range   xsd:string .
+
+# ============================================================================
+# Object properties
+# ============================================================================
+#
+# These properties link RDF resources together.
+# They are the navigable core of the graph:
+# - what a vulnerability affects
+# - what metric it has
+# - what exploits or KEV entries are linked
+# - what upstream project or release line is involved
+#
+# ── Object properties ─────────────────────────────────────────────────────
+
+vs:severity a owl:ObjectProperty ;
+    rdfs:label   "severity" ;
+    rdfs:comment "Links a vulnerability to its qualitative severity rating." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   vs:Severity .
+
+vs:hasCvssMetric a owl:ObjectProperty ;
+    owl:inverseOf vs:isMetricOf ;
+    rdfs:label   "has CVSS metric" ;
+    rdfs:comment "Associates a vulnerability with one or more CVSS metrics." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   vs:CVSSMetric .
+
+vs:isMetricOf a owl:ObjectProperty ;
+    rdfs:label   "is metric of" ;
+    rdfs:comment "Inverse of vs:hasCvssMetric." ;
+    rdfs:domain  vs:CVSSMetric ;
+    rdfs:range   vs:Vulnerability .
+
+# affectsProduct is the single most important relation in the application
+# domain: without it we cannot say which product is impacted.
+vs:affectsProduct a owl:ObjectProperty ;
+    owl:inverseOf vs:isAffectedBy ;
+    rdfs:label   "affects product" ;
+    rdfs:comment "Links a vulnerability to a product it affects." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   vs:Product .
+
+vs:isAffectedBy a owl:ObjectProperty ;
+    rdfs:label   "is affected by" ;
+    rdfs:comment "Inverse of vs:affectsProduct." ;
+    rdfs:domain  vs:Product ;
+    rdfs:range   vs:Vulnerability .
+
+vs:hasKEVEntry a owl:ObjectProperty ;
+    owl:inverseOf vs:isKEVEntryOf ;
+    rdfs:label   "has KEV entry" ;
+    rdfs:comment "Links a vulnerability to its corresponding KEV entry." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   vs:KEVEntry .
+
+vs:isKEVEntryOf a owl:ObjectProperty ;
+    rdfs:label   "is KEV entry of" ;
+    rdfs:comment "Inverse of vs:hasKEVEntry." ;
+    rdfs:domain  vs:KEVEntry ;
+    rdfs:range   vs:Vulnerability .
+
+# hasExploit models the presence of a public exploit reference. It does not
+# guarantee that the exploit is actively used in attacks, but it is a strong
+# operational signal useful for prioritisation and queries.
+vs:hasExploit a owl:ObjectProperty ;
+    owl:inverseOf vs:isExploitOf ;
+    rdfs:label   "has exploit" ;
+    rdfs:comment "Links a vulnerability to a known public exploit module or exploit reference." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   vs:ExploitModule .
+
+vs:isExploitOf a owl:ObjectProperty ;
+    rdfs:label   "is exploit of" ;
+    rdfs:comment "Inverse of vs:hasExploit." ;
+    rdfs:domain  vs:ExploitModule ;
+    rdfs:range   vs:Vulnerability .
+
+vs:affectsUpstream a owl:ObjectProperty ;
+    owl:inverseOf vs:isUpstreamOf ;
+    rdfs:label   "affects upstream" ;
+    rdfs:comment "Links a vulnerability to an upstream software project." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   vs:UpstreamProject .
+
+vs:isUpstreamOf a owl:ObjectProperty ;
+    rdfs:label   "is upstream of" ;
+    rdfs:comment "Inverse of vs:affectsUpstream." ;
+    rdfs:domain  vs:UpstreamProject ;
+    rdfs:range   vs:Vulnerability .
+
+# Release line and project are intentionally separate:
+# - the project represents the abstract software
+# - the release line represents a stable family/version such as 2.4.x
+vs:affectsReleaseLine a owl:ObjectProperty ;
+    owl:inverseOf vs:isReleaseLineAffectedBy ;
+    rdfs:label   "affects release line" ;
+    rdfs:comment "Links a vulnerability to an upstream release line such as 2.4.x." ;
+    rdfs:domain  vs:Vulnerability ;
+    rdfs:range   vs:ReleaseLine .
+
+vs:isReleaseLineAffectedBy a owl:ObjectProperty ;
+    rdfs:label   "is release line affected by" ;
+    rdfs:comment "Inverse of vs:affectsReleaseLine." ;
+    rdfs:domain  vs:ReleaseLine ;
+    rdfs:range   vs:Vulnerability .
+
+vs:releaseOf a owl:ObjectProperty ;
+    owl:inverseOf vs:hasReleaseLine ;
+    rdfs:label   "release of" ;
+    rdfs:comment "Links a release line to its upstream project." ;
+    rdfs:domain  vs:ReleaseLine ;
+    rdfs:range   vs:UpstreamProject .
+
+vs:hasReleaseLine a owl:ObjectProperty ;
+    rdfs:label   "has release line" ;
+    rdfs:comment "Inverse of vs:releaseOf." ;
+    rdfs:domain  vs:UpstreamProject ;
+    rdfs:range   vs:ReleaseLine .
+
+vs:baseSeverity a owl:ObjectProperty ;
+    owl:inverseOf vs:isBaseSeverityOf ;
+    rdfs:label   "base severity" ;
+    rdfs:comment "Links a CVSS metric to its qualitative base severity." ;
+    rdfs:domain  vs:CVSSMetric ;
+    rdfs:range   vs:Severity .
+
+vs:isBaseSeverityOf a owl:ObjectProperty ;
+    rdfs:label   "is base severity of" ;
+    rdfs:comment "Inverse of vs:baseSeverity." ;
+    rdfs:domain  vs:Severity ;
+    rdfs:range   vs:CVSSMetric .
+
+# ============================================================================
+# Final note
+# ============================================================================
+#
+# This ontology describes the project's persistent model.
+# Application-layer enrichment lives in a separate layer:
+# - it can be invoked from the dashboard and MCP
+# - it uses the vulnerability title/name as source text
+# - it returns supporting external links
+# - it does not automatically modify this Turtle file

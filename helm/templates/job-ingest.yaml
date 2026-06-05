@@ -1,0 +1,123 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redforge-ingest
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200
+  template:
+    metadata:
+      labels:
+        app: redforge-ingest
+        {{- include "redforge.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      restartPolicy: OnFailure
+      securityContext:
+        fsGroup: 1001
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
+      # Phase 1: download all sources and RDFize into /app/data/rdf/redforge.ttl
+      initContainers:
+        - name: ingest
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== RedForge: downloading sources ==="
+              python /app/redforge.py --config /etc/redforge/redforge.toml download
+              echo "=== RedForge: ingesting + RDFizing ==="
+              python /app/redforge.py --config /etc/redforge/redforge.toml ingest
+              echo "=== RedForge: ingest complete ==="
+          env:
+            - name: REDFORGE_CONFIG
+              value: /etc/redforge/redforge.toml
+            - name: NVD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: redforge-credentials
+                  key: nvd-api-key
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: config
+              mountPath: /etc/redforge
+      # Phase 2: upload the TTL to Virtuoso over HTTP — no shared PVC needed.
+      # Uses the SPARQL Graph Store protocol (PUT /sparql-graph-crud-auth).
+      containers:
+        - name: load-virtuoso
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              python3 - << 'PYEOF'
+              import requests, time, os, sys
+
+              base     = "http://redforge-virtuoso.{{ .Release.Namespace }}.svc.cluster.local:8890"
+              graph    = os.environ["REDFORGE_SPARQL_GRAPH"]
+              password = os.environ["VIRTUOSO_DBA_PASSWORD"]
+              ttl      = "/app/data/rdf/redforge.ttl"
+
+              print("Waiting for Virtuoso...")
+              for i in range(60):
+                  try:
+                      if requests.get(base + "/sparql", timeout=5).status_code < 500:
+                          print("Virtuoso ready.")
+                          break
+                  except Exception as e:
+                      print(f"  [{i}] {e}")
+                  time.sleep(10)
+              else:
+                  print("Virtuoso not ready after 10 min — giving up.")
+                  sys.exit(1)
+
+              print(f"Reading {ttl} ...")
+              with open(ttl, "rb") as fh:
+                  data = fh.read()
+              print(f"Uploading {len(data) // 1024} KB to graph {graph} ...")
+
+              from requests.auth import HTTPDigestAuth
+              r = requests.put(
+                  base + "/sparql-graph-crud-auth",
+                  params={"graph-uri": graph},
+                  data=data,
+                  headers={"Content-Type": "text/turtle"},
+                  auth=HTTPDigestAuth("dba", password),
+                  timeout=600,
+              )
+              print(f"HTTP {r.status_code}")
+              if r.status_code not in (200, 201, 204):
+                  print(r.text[:400])
+                  sys.exit(1)
+              print("Done.")
+              PYEOF
+          env:
+            - name: REDFORGE_SPARQL_GRAPH
+              value: {{ .Values.virtuoso.graphUri | quote }}
+            - name: VIRTUOSO_DBA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redforge-virtuoso
+                  key: dba-password
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: redforge-data
+        - name: config
+          configMap:
+            name: redforge-config

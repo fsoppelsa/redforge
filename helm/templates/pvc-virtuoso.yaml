@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redforge-virtuoso-db
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.storage.virtuoso.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.virtuoso.size }}
+  {{- if .Values.storage.virtuoso.storageClass }}
+  storageClassName: {{ .Values.storage.virtuoso.storageClass }}
+  {{- end }}

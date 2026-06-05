@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3-14b-api
+  namespace: redforge
+  labels:
+    app.kubernetes.io/name: redforge
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: redforge-0.1.0
+    redforge.local-model-route: "qwen3-14b-api"
+spec:
+  ports:
+    - name: http
+      port: 8000
+      protocol: TCP
+      targetPort: 8000
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: qwen3-14b-api
+  namespace: redforge
+  labels:
+    app.kubernetes.io/name: redforge
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: redforge-0.1.0
+    redforge.local-model-route: "qwen3-14b-api"
+subsets:
+  - addresses:
+      - ip: 192.168.1.47
+    ports:
+      - name: http
+        port: 8000
+        protocol: TCP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: qwen3-14b-api
+  namespace: redforge
+  labels:
+    app.kubernetes.io/name: redforge
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: redforge-0.1.0
+    redforge.local-model-route: "qwen3-14b-api"
+spec:
+  to:
+    kind: Service
+    name: qwen3-14b-api
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

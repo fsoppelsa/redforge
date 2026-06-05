@@ -1,0 +1,17 @@
+{{- range .Values.localModelRoutes }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "redforge.labels" $ | nindent 4 }}
+    redforge.local-model-route: {{ .name | quote }}
+spec:
+  ports:
+    - name: http
+      port: {{ .servicePort }}
+      protocol: TCP
+      targetPort: {{ .targetPort }}
+---
+{{- end }}

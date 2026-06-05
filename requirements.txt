@@ -1,0 +1,18 @@
+# Runtime — pipeline e dati
+pandas
+requests
+certifi
+rdflib
+
+# Visualizzazione (notebooks + dashboard)
+matplotlib
+
+# Dashboard web
+streamlit
+streamlit-ace
+
+# MCP server
+fastmcp
+
+# CLI output
+rich
