@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 from fastmcp import FastMCP
 
 _here = Path(__file__).parent
@@ -225,15 +226,30 @@ def query(
     from redforge.commands.query import run_query
 
     try:
-        df = run_query(
-            _config,
-            product=product,
-            version=version,
-            min_cvss=min_cvss,
-            severity=severity,
-            sort_by=sort_by,
-            graph=_graph,
-        )
+        _endpoint = os.environ.get("REDFORGE_SPARQL_ENDPOINT")
+        _graph_uri = os.environ.get("REDFORGE_SPARQL_GRAPH")
+        if _endpoint and _graph_uri:
+            # Route to Virtuoso — in-process rdflib is too slow for aggregate
+            # queries over the full graph (tens of seconds → client timeout).
+            from redforge.commands.query import run_query_remote
+            df = run_query_remote(
+                _config, _endpoint, _graph_uri,
+                product=product,
+                version=version,
+                min_cvss=min_cvss,
+                severity=severity,
+                sort_by=sort_by,
+            )
+        else:
+            df = run_query(
+                _config,
+                product=product,
+                version=version,
+                min_cvss=min_cvss,
+                severity=severity,
+                sort_by=sort_by,
+                graph=_graph,
+            )
         _tool_log(
             "query",
             {
@@ -586,6 +602,115 @@ def sbom_cached(target: str, target_type: str | None = None, scan_path: str = "/
     return json.dumps(result, indent=2)
 
 
+# Triage jobs keyed by target+scan_path (NOT a job_id), so an agent can poll by
+# simply repeating the identical suggest_v2_now call. Weak models reliably repeat
+# the same call but drop job_ids, and a fully synchronous ~30s call trips client
+# timeouts — this design avoids both.
+_suggest_now_jobs: dict[str, dict] = {}
+
+
+@mcp.tool()
+def suggest_v2_now(
+    target: str,
+    target_type: str | None = None,
+    scan_path: str = "/",
+    top_n: int = 25,
+) -> str:
+    """Triage a CACHED SBOM for prioritized CVEs — no job_id, poll by repeating.
+
+    Use this when a cached SBOM already exists (run generate_sbom first, or
+    suggest_v2 once). It reuses the cached SBOM and never runs syft. The triage
+    takes ~30s, so the FIRST call returns {"status":"running"} immediately and
+    does the work in the background.
+
+    To get the result, call this tool AGAIN with the SAME arguments. There is no
+    job_id: the result is keyed by target + scan_path. Keep repeating the
+    identical call until it returns {"status":"done"} with summary/items/
+    diagnostics. Each call returns instantly, so it never trips a client timeout.
+
+    Args:
+        target: SSH target (user@host), container image reference, or local path.
+        target_type: "ssh", "image", or "path". Auto-detected from target if omitted.
+        scan_path: Directory key on a remote SSH host (default "/"). Must match the
+                   value used when the SBOM was generated.
+        top_n: Number of CVEs to return (default 25).
+
+    Returns:
+        {"status":"running", ...} until ready, then {"status":"done", summary,
+        items, diagnostics, scan_metadata}. If no cached SBOM exists for this
+        target/scan_path, returns an error telling you to run generate_sbom first
+        — it never scans.
+    """
+    started = time.perf_counter()
+    from redforge.commands.suggest_v2 import (
+        detect_target_type, suggest_v2_core, sbom_cache_status,
+    )
+
+    try:
+        resolved_type = detect_target_type(target, target_type)
+    except ValueError as exc:
+        return json.dumps({"error": True, "stage": "input_validation", "message": str(exc)}, indent=2)
+
+    key = f"{resolved_type}:{target}:{scan_path}"
+    job = _suggest_now_jobs.get(key)
+
+    # Repeated call: report progress or hand back the finished result.
+    if job is not None:
+        if job["status"] == "running":
+            return json.dumps({
+                "status": "running",
+                "elapsed_seconds": round(time.time() - job["started"], 1),
+                "message": "Triage still running. Call suggest_v2_now again with the same arguments.",
+            }, indent=2)
+        if job["status"] == "done":
+            return json.dumps({"status": "done", **job["result"]}, indent=2)
+        # status == "error": drop it so this call can retry below.
+        _suggest_now_jobs.pop(key, None)
+
+    # First call (or retry after error): require a cached SBOM — never scan here.
+    cache_status = sbom_cache_status(target, target_type, scan_path)
+    if not cache_status.get("cached"):
+        return json.dumps({
+            "error": True,
+            "stage": "no_cached_sbom",
+            "message": (
+                f"No cached SBOM for {target} (scan_path={scan_path!r}). "
+                "Run generate_sbom first — suggest_v2_now never scans."
+            ),
+        }, indent=2)
+
+    args_summary = {"target": target, "target_type": resolved_type, "top_n": top_n, "scan_path": scan_path}
+    ssh_key_path = os.environ.get("SSH_KEY_PATH", "/etc/ssh-key/id_ed25519")
+    _suggest_now_jobs[key] = {"status": "running", "started": time.time(), "result": None}
+
+    def _run() -> None:
+        try:
+            result = suggest_v2_core(
+                _config,
+                target=target,
+                target_type=target_type,
+                scan_path=scan_path,
+                top_n=top_n,
+                timeout=int(os.environ.get("SYFT_TIMEOUT", "600")),
+                ssh_key_path=ssh_key_path,
+                force=False,
+                remote_sbom=False,
+            )
+            _suggest_now_jobs[key]["result"] = result
+            _suggest_now_jobs[key]["status"] = "done"
+            _tool_log("suggest_v2_now", args_summary, started, ok=True)
+        except Exception as exc:
+            _suggest_now_jobs[key]["status"] = "error"
+            _suggest_now_jobs[key]["error"] = str(exc)
+            _tool_log("suggest_v2_now", args_summary, started, ok=False, err=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return json.dumps({
+        "status": "running",
+        "message": "Triage started. Call suggest_v2_now again with the SAME arguments to get the result.",
+    }, indent=2)
+
+
 @mcp.tool()
 def plan_insights(cves: list[dict], target_host: str) -> str:
     """Create a Red Hat Insights remediation plan for a list of CVEs on a specific host.
@@ -837,11 +962,18 @@ def sparql_query(query: str) -> str:
         JSON array of result rows (one object per row, keyed by variable name).
     """
     started = time.perf_counter()
-    from redforge.pipeline import query as run_query
     from redforge.commands.query import normalize_sparql_input
 
     try:
-        df = run_query(_graph, normalize_sparql_input(query))
+        sparql = normalize_sparql_input(query)
+        _endpoint = os.environ.get("REDFORGE_SPARQL_ENDPOINT")
+        _graph_uri = os.environ.get("REDFORGE_SPARQL_GRAPH")
+        if _endpoint and _graph_uri:
+            from redforge.commands.query import run_sparql_remote
+            df = run_sparql_remote(_endpoint, _graph_uri, sparql)
+        else:
+            from redforge.pipeline import query as run_sparql
+            df = run_sparql(_graph, sparql)
         _tool_log(
             "sparql_query",
             {"query_len": len(query or ""), "query_prefix": (query or "")[:80]},

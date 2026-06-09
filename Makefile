@@ -1,4 +1,4 @@
-VERSION    ?= 0.1.0
+VERSION    ?= 0.2.10
 IMAGE_REG  ?= quay.io/fsoppelsa
 APP_IMAGE  ?= $(IMAGE_REG)/redforge:$(VERSION)
 NAMESPACE  ?= redforge
