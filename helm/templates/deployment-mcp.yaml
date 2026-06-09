@@ -48,6 +48,10 @@ spec:
               value: {{ include "redforge.sparqlEndpoint" . | quote }}
             - name: REDFORGE_SPARQL_GRAPH
               value: {{ .Values.virtuoso.graphUri | quote }}
+            # Keep the syft SBOM cache on the data PVC so it survives pod
+            # restarts/redeploys (a full-host scan can take many minutes).
+            - name: SYFT_CACHE_DIR
+              value: /app/data/sbom-cache
           ports:
             - name: http
               containerPort: 8000

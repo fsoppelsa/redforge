@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import requests
 from datakit.processors.ranking import rank_vulnerabilities
 from datakit.processors.scoring import compute_vulnerability_score
 
@@ -154,6 +155,61 @@ def run_query(
             columns=["cve_id", "cve_url", "cvss", "severity", "is_kev", "public_date", "risk_score"]
         )
     df = run_sparql_query(graph, sparql)
+    return _finalize_query_results(df, sort_by=sort_by)
+
+
+def _sparql_results_to_df(payload: dict) -> pd.DataFrame:
+    """Convert a SPARQL 1.1 JSON results object into a DataFrame of string values."""
+    head = payload.get("head", {}).get("vars", [])
+    bindings = payload.get("results", {}).get("bindings", [])
+    rows = [{v: b.get(v, {}).get("value") for v in head} for b in bindings]
+    return pd.DataFrame(rows, columns=head)
+
+
+def run_sparql_remote(endpoint: str, graph_uri: str, sparql: str, timeout: int = 60) -> pd.DataFrame:
+    """Execute a SPARQL SELECT against a remote HTTP endpoint (e.g. Virtuoso).
+
+    graph_uri is passed as default-graph-uri so queries written against the
+    default graph resolve against the named graph the data was loaded into.
+    rdflib's in-process engine is too slow for aggregate queries over a large
+    graph; routing to Virtuoso turns multi-minute queries into sub-second ones.
+    """
+    resp = requests.get(
+        endpoint,
+        params={
+            "query": sparql,
+            "default-graph-uri": graph_uri,
+            "format": "application/sparql-results+json",
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return _sparql_results_to_df(resp.json())
+
+
+def run_query_remote(
+    config: dict,
+    endpoint: str,
+    graph_uri: str,
+    product: str = "all",
+    version: str = "all",
+    min_cvss: float = 0.0,
+    severity: str = "low",
+    sort_by: str = "priority",
+    product_shorts: list[str] | None = None,
+) -> pd.DataFrame:
+    """Like run_query, but executes against a remote SPARQL endpoint (fast)."""
+    shorts = product_shorts if product_shorts is not None else _resolve_product_shorts(config, product, version)
+    sparql = _build_query_sparql(product_shorts=shorts, min_cvss=min_cvss, severity=severity)
+    if not sparql:
+        return pd.DataFrame(
+            columns=["cve_id", "cve_url", "cvss", "severity", "is_kev", "public_date", "risk_score"]
+        )
+    df = run_sparql_remote(endpoint, graph_uri, sparql)
+    # Virtuoso serialises xsd:boolean as "0"/"1"; normalise so _finalize maps them.
+    for bcol in ("is_kev", "has_public_exploit"):
+        if bcol in df.columns:
+            df[bcol] = df[bcol].map(lambda v: "true" if str(v).strip().lower() in ("1", "true") else "false")
     return _finalize_query_results(df, sort_by=sort_by)
 
 

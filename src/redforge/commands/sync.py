@@ -292,25 +292,51 @@ def _fetch_redhat_cve(
     on_progress: Callable[[str], None] | None = None,
     on_step: Callable[[int], None] | None = None,
 ) -> None:
-    """Download Red Hat CVEs by concatenating paginated API results."""
+    """Download Red Hat CVEs by concatenating paginated API results.
+
+    Runs the recency window (newest-first, all severities), then a
+    severity-priority pass for Critical and Important CVEs so high-severity
+    entries are never evicted by the page cap, no matter how new the product
+    is. Results are de-duplicated by CVE id.
+    """
     items: list = []
-    for page in range(1, max_pages + 1):
-        if on_step:
-            on_step(min((page - 1) * 100 // max_pages, 99))
+    seen: set = set()
+    pages_done = 0
+    total_pages = max_pages * 3  # recency pass + one pass per priority severity
+
+    def _collect(extra_params: dict) -> None:
+        nonlocal pages_done
+        for page in range(1, max_pages + 1):
+            if on_step:
+                on_step(min(pages_done * 100 // total_pages, 99))
+            params: dict = {"page": page, "per_page": per_page, **extra_params}
+            if product:
+                params["product"] = product
+            resp = sess.get(url, params=params, timeout=_TIMEOUT_API)
+            resp.raise_for_status()
+            page_data: list = resp.json()
+            pages_done += 1
+            if not page_data:
+                break
+            for cve in page_data:
+                cid = cve.get("CVE")
+                if cid is not None and cid in seen:
+                    continue
+                if cid is not None:
+                    seen.add(cid)
+                items.append(cve)
+            if len(page_data) < per_page:
+                break
+            time.sleep(0.5)
+
+    for label, extra in (
+        ("recency", {}),
+        ("critical", {"severity": "critical"}),
+        ("important", {"severity": "important"}),
+    ):
         if on_progress:
-            on_progress(f"  page {page}  ({len(items)} CVEs so far)")
-        params: dict = {"page": page, "per_page": per_page}
-        if product:
-            params["product"] = product
-        resp = sess.get(url, params=params, timeout=_TIMEOUT_API)
-        resp.raise_for_status()
-        page_data: list = resp.json()
-        if not page_data:
-            break
-        items.extend(page_data)
-        if len(page_data) < per_page:
-            break
-        time.sleep(0.5)
+            on_progress(f"  {label} pass  ({len(items)} CVEs so far)")
+        _collect(extra)
 
     _atomic_write_text(dest, json.dumps(items))
     if on_progress:

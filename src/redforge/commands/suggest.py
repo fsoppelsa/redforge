@@ -41,6 +41,24 @@ def run_suggest(
     return pd.DataFrame(result["items"])
 
 
+# Cap the unmatched-component list so the result stays small for very large
+# SBOMs (a full-host scan can have tens of thousands of components, which would
+# otherwise produce a multi-MB tool result that the MCP transport can't return).
+_UNMATCHED_SAMPLE = 50
+
+# Cap each item's matched-component / affected-package list too: a single CVE on
+# a large host can match hundreds of components, which would bloat the result.
+# The true totals are preserved in *_count fields.
+_ITEM_SAMPLE = 10
+
+
+def _unmatched_diagnostics(unmatched: list[str]) -> dict[str, Any]:
+    return {
+        "unmatched_component_count": len(unmatched),
+        "unmatched_components": unmatched[:_UNMATCHED_SAMPLE],
+    }
+
+
 def suggest_from_sbom(
     config: dict,
     sbom: bytes | str | dict[str, Any],
@@ -58,9 +76,7 @@ def suggest_from_sbom(
                 "returned_items": 0,
             },
             "items": [],
-            "diagnostics": {
-                "unmatched_components": [c["name"] for c in components],
-            },
+            "diagnostics": _unmatched_diagnostics([c["name"] for c in components]),
         }
 
     matched = _match_sbom_components(config, alias_map)
@@ -73,19 +89,17 @@ def suggest_from_sbom(
                 "returned_items": 0,
             },
             "items": [],
-            "diagnostics": {
-                "unmatched_components": [c["name"] for c in components],
-            },
+            "diagnostics": _unmatched_diagnostics([c["name"] for c in components]),
         }
 
     matched = _aggregate_matches(matched)
     ranked = _finalize_query_results(matched, sort_by="priority").head(top_n).reset_index(drop=True)
     if "matched_components" in ranked.columns:
         ranked["matched_component_count"] = ranked["matched_components"].apply(len)
-        ranked["matched_components"] = ranked["matched_components"].apply(lambda values: ", ".join(values))
+        ranked["matched_components"] = ranked["matched_components"].apply(lambda values: ", ".join(values[:_ITEM_SAMPLE]))
     if "affected_packages" in ranked.columns:
         ranked["affected_package_count"] = ranked["affected_packages"].apply(len)
-        ranked["affected_packages"] = ranked["affected_packages"].apply(lambda values: ", ".join(values))
+        ranked["affected_packages"] = ranked["affected_packages"].apply(lambda values: ", ".join(values[:_ITEM_SAMPLE]))
 
     matched_components = {
         component
@@ -108,9 +122,7 @@ def suggest_from_sbom(
     return {
         "summary": summary,
         "items": ranked.to_dict(orient="records"),
-        "diagnostics": {
-            "unmatched_components": unmatched_components,
-        },
+        "diagnostics": _unmatched_diagnostics(unmatched_components),
     }
 
 
